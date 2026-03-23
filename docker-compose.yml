@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  magic-transfer:
+    build:
+      context: .
+      target: production
+    container_name: magic-transfer
+    hostname: magic-transfer
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./output:/output:rw
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SERVER_HOST=0.0.0.0
+      - API_KEY=${API_KEY}
+      - MAX_UPLOAD_BYTES=${MAX_UPLOAD_BYTES:-524288000}
+    restart: unless-stopped
+    networks:
+      - magic-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    tmpfs:
+      - /tmp
+
+networks:
+  magic-network:
+    driver: bridge

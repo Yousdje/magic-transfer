@@ -1,0 +1,10 @@
+aiohttp>=3.10.0
+cryptography>=43.0.0
+aiofiles==23.2.1
+requests==2.31.0
+Pillow>=10.3.0
+
+# Test dependencies
+pytest==7.4.4
+pytest-aiohttp==1.0.5
+pytest-asyncio==0.23.3
