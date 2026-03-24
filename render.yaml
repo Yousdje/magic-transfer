@@ -13,7 +13,3 @@ services:
         generateValue: true
       - key: MAX_UPLOAD_BYTES
         value: "524288000"
-    disk:
-      name: uploads
-      mountPath: /output
-      sizeGB: 1
