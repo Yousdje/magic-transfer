@@ -1,123 +1,73 @@
-# Universal Secure File Transfer
-# Cross-platform architecture voor iOS, Android, Windows, Linux
+# MagicTransfer Architecture
 
-## Architectuur Overview
+## Overview
 
-```
-┌─────────────────────────────────────────────────┐
-│         Docker Container (Proxmox)              │
-│  ┌───────────────────────────────────────────┐  │
-│  │   Secure Transfer Server                   │  │
-│  │   - REST API                               │  │
-│  │   - WebSocket support                      │  │
-│  │   - E2E Encryption orchestration           │  │
-│  │   - Session management                     │  │
-│  └───────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-                       ▲
-                       │ HTTPS/WSS
-        ┌──────────────┼──────────────┐
-        │              │              │
-┌───────▼──────┐ ┌────▼─────┐ ┌──────▼──────┐
-│   iOS App    │ │ Android  │ │  Web Client │
-│  (Native)    │ │  (Native)│ │(iOS/Android)│
-└──────────────┘ └──────────┘ └─────────────┘
-        │              │              │
-┌───────▼──────────────▼──────────────▼──────┐
-│            Windows / Linux                  │
-│  - CLI client (Python)                      │
-│  - Web browser (GUI)                        │
-│  - Electron app (optional)                  │
-└─────────────────────────────────────────────┘
-```
+MagicTransfer is a zero-knowledge encrypted file and text sharing service. All encryption happens in the browser — the server is a simple encrypted blob store.
 
 ## Components
 
-### 1. Central Server (Docker)
-- REST API voor file metadata
-- WebSocket voor real-time signaling
-- Draait op je Proxmox
-- Toegankelijk via Tailscale
+### Server (Python/aiohttp)
+- `server.py` — single-file application
+- Stores encrypted blobs on disk, encrypted text in memory
+- Verifies auth tokens (HKDF-derived) without knowing the encryption key
+- Session management with auto-expiry and burn-after-read
+- Prometheus-compatible metrics at `/metrics`
 
-### 2. Web Client (Universal)
-- Works on ALL devices met browser
-- Progressive Web App (PWA)
-- iOS Safari compatible
-- Android Chrome compatible
-- Desktop browsers
-- Can be "installed" as app
+### Client (Browser JavaScript)
+- Web Crypto API for all cryptographic operations
+- HKDF-SHA-256 key derivation from 256-bit IKM
+- AES-256-GCM chunked file encryption (64KB chunks)
+- Inline in `server.py` (no external JS dependencies)
 
-### 3. Native CLI
-- Python-based
-- Works on Linux/Windows/macOS
-- No GUI needed
-- Scriptable
+### Deployment
+- Docker container (non-root, capability-dropped)
+- Cloudflare Tunnel for public access (TLS + DDoS protection)
+- Self-hosted on Proxmox
 
-### 4. Native Apps (Optional)
-- iOS: Swift app
-- Android: Kotlin app
-- Better UX than web
-- Background transfers
+## Data Flow
 
-## Access Methods
-
-| Device | Method 1 (Best) | Method 2 | Method 3 |
-|--------|-----------------|----------|----------|
-| iOS | Web App (PWA) | Safari | Native app* |
-| Android | Web App (PWA) | Chrome | Native app* |
-| Windows | Web browser | CLI | Desktop app* |
-| Arch Linux | CLI | Web browser | - |
-| Linux (no GUI) | CLI | - | - |
-
-*Native apps = future enhancement
-
-## Installation per Platform
-
-### Server (Proxmox Docker)
-```bash
-docker-compose up -d
-# Access: https://transfer.tailnet-name.ts.net
+### Upload
+```
+Browser: generate IKM -> derive keys -> encrypt file -> encrypt metadata
+         |
+Server:  store encrypted blob to disk, save auth_token + encrypted_meta
+         |
+Browser: display share URL with IKM in fragment (#)
 ```
 
-### iOS/Android (Web App)
+### Download
 ```
-1. Open Safari/Chrome
-2. Navigate to: https://your-server:8080
-3. Tap "Share" → "Add to Home Screen"
-4. Now works like native app!
-```
-
-### Windows/Linux (CLI)
-```bash
-pip install cryptography requests websockets
-./client.py send file.txt
-./client.py receive
+Browser: read IKM from URL fragment -> derive keys -> fetch info
+         |
+Server:  verify auth_token -> stream encrypted blob
+         |
+Browser: decrypt blob -> trigger file download -> call /api/complete
+         |
+Server:  delete encrypted blob from disk (burn-after-read)
 ```
 
-### Linux (no GUI)
-```bash
-# Same as above, pure terminal
-./client.py send /data/backup.tar.gz
-```
+## Routes
 
-## Key Features
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/` | No | Home page |
+| GET | `/d/{file_id}` | No | Download page |
+| POST | `/api/upload` | No* | Upload encrypted blob |
+| POST | `/api/text` | No* | Store encrypted text |
+| GET | `/api/info/{file_id}` | Bearer | Get content type + encrypted metadata |
+| GET | `/api/download/{file_id}` | Bearer | Stream encrypted blob |
+| GET | `/api/text/{file_id}` | Bearer | Get encrypted text |
+| POST | `/api/complete/{file_id}` | Bearer | Burn after read |
+| GET | `/health` | No | Health check |
+| GET | `/metrics` | No | Prometheus metrics |
 
-### Cross-Platform
-✅ Single server, multiple clients
-✅ Same pairing code system
-✅ Works everywhere
+*Upload/text endpoints are protected by per-IP rate limiting.
 
-### Progressive Enhancement
-- Basic: Web browser (works everywhere)
-- Better: PWA (app-like experience)
-- Best: Native apps (future)
+## Security Layers
 
-### Offline First
-- Server can be offline
-- P2P fallback (when both online)
-- Queue transfers
-
-### Network Agnostic
-- LAN (direct)
-- Tailscale VPN
-- WAN (with relay server)
+1. **Zero-knowledge crypto** — server never sees plaintext or keys
+2. **CSP with nonces** — prevents XSS/script injection
+3. **Rate limiting** — per-IP on uploads and downloads
+4. **Burn-after-read** — single-use transfers
+5. **Session TTL** — auto-expire after 1 hour
+6. **Docker hardening** — non-root, no-new-privileges, CAP_DROP ALL
