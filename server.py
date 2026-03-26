@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw
 
 MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(500 * 1024 * 1024)))
 MAX_TEXT_BYTES = int(os.environ.get("MAX_TEXT_BYTES", str(200 * 1024)))  # 200KB encrypted text
-MAX_META_BYTES = 4096
+MAX_META_BYTES = 8192
 SESSION_TTL_MINUTES = int(os.environ.get("SESSION_TTL_MINUTES", "60"))
 MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", "200"))
 
@@ -899,10 +899,13 @@ async def index(request):
                 <p style="font-size: 12px; color: #999; margin-top: 5px;">or drag & drop</p>
             </div>
             <input type="file" id="file-input">
+            <p style="font-size:12px;color:#999;text-align:center;margin-bottom:15px;">Max file size: {MAX_UPLOAD_BYTES // (1024*1024)} MB</p>
             <div id="file-selected" class="file-info" style="display:none">
                 <p><strong>File:</strong> <span id="file-name"></span></p>
                 <p><strong>Size:</strong> <span id="file-size"></span></p>
             </div>
+            <div id="file-error" class="status error" style="display:none;margin-bottom:15px;"></div>
+            <textarea id="file-message" rows="3" maxlength="4000" placeholder="Add a message (optional)" style="min-height:auto;margin-bottom:15px;display:none;"></textarea>
             <button class="btn" id="send-btn" disabled>Encrypt & Upload</button>
             <div id="send-progress-label" class="progress-label"></div>
             <div id="send-progress" class="progress"><div id="send-progress-bar" class="progress-bar"></div></div>
@@ -951,13 +954,25 @@ async def index(request):
         }}
     }}
 
+    const MAX_FILE_SIZE = {MAX_UPLOAD_BYTES};
+
     function handleFileSelect(event) {{
         selectedFile = event.target.files[0];
         if (selectedFile) {{
             document.getElementById('file-name').textContent = selectedFile.name;
             document.getElementById('file-size').textContent = formatBytes(selectedFile.size);
             document.getElementById('file-selected').style.display = 'block';
-            document.getElementById('send-btn').disabled = false;
+            const errEl = document.getElementById('file-error');
+            if (selectedFile.size > MAX_FILE_SIZE) {{
+                errEl.textContent = 'File exceeds the ' + formatBytes(MAX_FILE_SIZE) + ' size limit.';
+                errEl.style.display = 'block';
+                document.getElementById('send-btn').disabled = true;
+                document.getElementById('file-message').style.display = 'none';
+            }} else {{
+                errEl.style.display = 'none';
+                document.getElementById('send-btn').disabled = false;
+                document.getElementById('file-message').style.display = 'block';
+            }}
         }}
     }}
 
@@ -1006,11 +1021,14 @@ async def index(request):
             const {{ fileKey, metaKey, authToken }} = await deriveKeys(ikm);
 
             // 2. Encrypt metadata
-            const encMeta = await encryptMeta(metaKey, {{
+            const metaObj = {{
                 name: selectedFile.name,
                 size: selectedFile.size,
                 type: selectedFile.type || 'application/octet-stream'
-            }});
+            }};
+            const fileMsg = document.getElementById('file-message').value.trim();
+            if (fileMsg) metaObj.message = fileMsg;
+            const encMeta = await encryptMeta(metaKey, metaObj);
 
             // 3. Encrypt file
             showProgress('send', 0, 'Encrypting...');
@@ -1165,10 +1183,15 @@ async def download_page(request):
         </div>
 
         <div id="file-view" style="display:none;">
+            <div id="dl-message" style="display:none;background:#f0e6ff;padding:15px;border-radius:10px;margin-bottom:15px;border-left:4px solid #e040fb;">
+                <p style="font-size:12px;color:#999;margin-bottom:4px;">Message from sender:</p>
+                <p id="dl-message-text" style="color:#333;white-space:pre-wrap;"></p>
+            </div>
             <div class="file-info">
                 <p><strong>File:</strong> <span id="dl-name"></span></p>
                 <p><strong>Size:</strong> <span id="dl-size"></span></p>
             </div>
+            <button class="btn" id="dl-btn" style="margin-top:15px;">Download File</button>
             <div id="dl-progress-label" class="progress-label"></div>
             <div id="dl-progress" class="progress"><div id="dl-progress-bar" class="progress-bar"></div></div>
             <div id="dl-status" class="status"></div>
@@ -1302,51 +1325,63 @@ async def download_page(request):
                 showError('Failed to decrypt text: ' + e.message);
             }}
         }} else {{
-            // File download
+            // File download — show info and wait for user to click download
             document.getElementById('file-view').style.display = 'block';
             document.getElementById('dl-name').textContent = meta.name || 'unknown';
             document.getElementById('dl-size').textContent = formatBytes(meta.size || 0);
 
-            try {{
-                showDlProgress(0, 'Downloading...');
-                const resp = await fetch('/api/download/' + FILE_ID, {{
-                    headers: {{ 'Authorization': 'Bearer ' + authToken }}
-                }});
-                if (!resp.ok) throw new Error('Download failed');
-
-                const encryptedData = await resp.arrayBuffer();
-                showDlProgress(0.5, 'Decrypting...');
-
-                const decryptedBlob = await decryptFile(fileKey, encryptedData, pct => {{
-                    showDlProgress(0.5 + pct * 0.5, 'Decrypting...');
-                }});
-
-                // Trigger browser download
-                const url = URL.createObjectURL(decryptedBlob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = meta.name || 'download';
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-                URL.revokeObjectURL(url);
-
-                showDlProgress(1, 'Complete!');
-                const s = document.getElementById('dl-status');
-                s.className = 'status show success';
-                s.textContent = 'File decrypted and downloaded successfully.';
-
-                // Burn after read
-                await fetch('/api/complete/' + FILE_ID, {{
-                    method: 'POST',
-                    headers: {{ 'Authorization': 'Bearer ' + authToken }}
-                }});
-            }} catch (e) {{
-                showDlProgress(0, '');
-                const s = document.getElementById('dl-status');
-                s.className = 'status show error';
-                s.textContent = 'Decryption failed: ' + e.message;
+            if (meta.message) {{
+                document.getElementById('dl-message').style.display = 'block';
+                document.getElementById('dl-message-text').textContent = meta.message;
             }}
+
+            document.getElementById('dl-btn').addEventListener('click', async function() {{
+                const btn = document.getElementById('dl-btn');
+                btn.disabled = true;
+                btn.textContent = 'Downloading...';
+
+                try {{
+                    showDlProgress(0, 'Downloading...');
+                    const resp = await fetch('/api/download/' + FILE_ID, {{
+                        headers: {{ 'Authorization': 'Bearer ' + authToken }}
+                    }});
+                    if (!resp.ok) throw new Error('Download failed');
+
+                    const encryptedData = await resp.arrayBuffer();
+                    showDlProgress(0.5, 'Decrypting...');
+
+                    const decryptedBlob = await decryptFile(fileKey, encryptedData, pct => {{
+                        showDlProgress(0.5 + pct * 0.5, 'Decrypting...');
+                    }});
+
+                    const url = URL.createObjectURL(decryptedBlob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = meta.name || 'download';
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+
+                    showDlProgress(1, 'Complete!');
+                    const s = document.getElementById('dl-status');
+                    s.className = 'status show success';
+                    s.textContent = 'File decrypted and downloaded successfully.';
+                    btn.style.display = 'none';
+
+                    await fetch('/api/complete/' + FILE_ID, {{
+                        method: 'POST',
+                        headers: {{ 'Authorization': 'Bearer ' + authToken }}
+                    }});
+                }} catch (e) {{
+                    showDlProgress(0, '');
+                    const s = document.getElementById('dl-status');
+                    s.className = 'status show error';
+                    s.textContent = 'Decryption failed: ' + e.message;
+                    btn.disabled = false;
+                    btn.textContent = 'Download File';
+                }}
+            }});
         }}
     }}
 
